@@ -362,9 +362,70 @@ const probed = await runHttpAssertionCheck({
 });
 ```
 
-This is the SDK-side assertion/probe foundation. It does not define an action
-test runner, action-contract schema, consistency-window polling, replay,
-certification, or server-side verification event storage.
+This is the SDK-side assertion/probe foundation. It does not define an
+action-contract schema, consistency-window polling, replay, certification, or
+server-side verification event storage.
+
+## Agent action tests
+
+`preman test` runs a suite of action tests: it drives an action, checks the
+response, then verifies backend state with the same assertions described above.
+Like `preman assert`, it runs without a PreMan API key.
+
+```bash
+npx preman-sdk test --suite preman.agent-tests.json
+npx preman-sdk test --suite preman.agent-tests.json --json --bail
+npx preman-sdk test --suite preman.agent-tests.json --dry-run
+```
+
+A suite is a JSON file. Each test has an `action`, and at least one of `expect`
+(assertions against the action response) or `verify` (an assertion config,
+identical in shape to `preman assert`, run against backend state afterwards).
+
+```json
+{
+  "version": 1,
+  "name": "refund-agent-actions",
+  "tests": [
+    {
+      "id": "refund-created",
+      "action": {
+        "kind": "http",
+        "method": "POST",
+        "url": "https://staging.example.com/agent/refund",
+        "headersFromEnv": { "Authorization": "STAGING_AUTHORIZATION" },
+        "body": { "order_id": 1049, "amount": 82 }
+      },
+      "expect": [{ "op": "equals", "pointer": "/status", "expected": "accepted" }],
+      "verify": {
+        "probe": { "url": "https://staging.example.com/refunds?order_id=1049" },
+        "assertions": [{ "op": "no_duplicate", "pointer": "/refunds" }]
+      }
+    }
+  ]
+}
+```
+
+Action kinds are `http` and `noop`. Use `noop` for a state-only check that
+verifies without driving an action first. `method` defaults to `POST` and
+`timeoutMs` defaults to 5000.
+
+As with probes, literal `headers` are rejected in a suite file so credentials
+stay out of version control - use `headersFromEnv`. Action URLs are redacted in
+output, and a non-2xx action response is reported as an errored test rather than
+a failed assertion, so an action that could not run is distinguishable from one
+whose result was wrong.
+
+Exit codes: `0` when every test passed, `1` when any test failed or errored, and
+`2` when the suite file could not be read or parsed. See
+`examples/preman.agent-tests.example.json` for a complete suite.
+
+```ts
+import { parseAgentTestSuite, runAgentTestSuite } from "preman-sdk";
+
+const suite = parseAgentTestSuite(await readFile("preman.agent-tests.json", "utf8"));
+const result = await runAgentTestSuite(suite);
+```
 
 ## TypeScript SDK
 

@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "name": "refund-agent-actions",
+  "tests": [
+    {
+      "id": "refund-created",
+      "description": "The refund action accepts the request and writes exactly one issued refund.",
+      "action": {
+        "kind": "http",
+        "method": "POST",
+        "url": "https://staging.example.com/agent/refund",
+        "headersFromEnv": {
+          "Authorization": "STAGING_AUTHORIZATION"
+        },
+        "body": {
+          "order_id": 1049,
+          "amount": 82
+        },
+        "timeoutMs": 5000
+      },
+      "expect": [
+        { "op": "equals", "pointer": "/status", "expected": "accepted" },
+        { "op": "latency_threshold", "maxMs": 2000 }
+      ],
+      "verify": {
+        "probe": {
+          "url": "https://staging.example.com/refunds?order_id=1049",
+          "headersFromEnv": {
+            "Authorization": "STAGING_AUTHORIZATION"
+          },
+          "notFoundStatuses": [404]
+        },
+        "assertions": [
+          { "op": "exists", "pointer": "/refunds/0" },
+          { "op": "equals", "pointer": "/refunds/0/status", "expected": "issued" },
+          { "op": "no_duplicate", "pointer": "/refunds" }
+        ]
+      }
+    },
+    {
+      "id": "no-orphan-refund",
+      "description": "State-only check: a cancelled order must not leave a refund behind.",
+      "action": { "kind": "noop" },
+      "verify": {
+        "probe": {
+          "url": "https://staging.example.com/refunds?order_id=1050",
+          "headersFromEnv": {
+            "Authorization": "STAGING_AUTHORIZATION"
+          },
+          "notFoundStatuses": [404]
+        },
+        "assertions": [
+          { "op": "not_exists", "pointer": "/refunds/0" }
+        ]
+      }
+    }
+  ]
+}

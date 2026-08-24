@@ -40,6 +40,12 @@ export {
   parseCatalogSnapshot,
 } from "./catalog.js";
 export {
+  formatAgentTestSuiteResult,
+  parseAgentTestSuite,
+  runAgentTestCase,
+  runAgentTestSuite,
+} from "./agent-tests.js";
+export {
   evaluateStateAssertion,
   evaluateStateAssertions,
   runHttpAssertionCheck,
@@ -293,6 +299,20 @@ export type {
   StateAssertion,
   StateObservation,
 } from "./assertions.js";
+export type {
+  ActionError,
+  ActionOutcome,
+  AgentAction,
+  AgentTestCase,
+  AgentTestResult,
+  AgentTestRunOptions,
+  AgentTestSuite,
+  AgentTestSuiteResult,
+  AgentTestSummary,
+  HttpAction,
+  HttpActionMethod,
+  NoopAction,
+} from "./agent-tests.js";
 export type {
   CatalogDiff,
   CatalogDiffFinding,

@@ -7,6 +7,11 @@ import {
   normalizeHostedMcpCatalog,
   parseCatalogSnapshot,
 } from "./catalog.js";
+import {
+  formatAgentTestSuiteResult,
+  parseAgentTestSuite,
+  runAgentTestSuite,
+} from "./agent-tests.js";
 import { runStateAssertionConfig } from "./assertions.js";
 import { PremanClient } from "./client.js";
 import { readConfig, writeConfig } from "./config.js";
@@ -53,6 +58,7 @@ type Command =
   | "snapshot"
   | "diff"
   | "assert"
+  | "test"
   | "typegen"
   | "help";
 const VERSION = "0.5.0";
@@ -80,6 +86,11 @@ async function main(): Promise<void> {
 
   if (command === "assert") {
     await handleAssertCommand(args);
+    return;
+  }
+
+  if (command === "test") {
+    await handleTestCommand(args);
     return;
   }
 
@@ -500,6 +511,74 @@ async function handleAssertCommand(args: string[]): Promise<void> {
   }
 }
 
+async function handleTestCommand(args: string[]): Promise<void> {
+  const file = valueFor(args, "--suite");
+  const asJson = hasFlag(args, "--json");
+  if (!file) {
+    printTestError(asJson, "invalid_config", "test requires --suite preman.agent-tests.json");
+    process.exitCode = 2;
+    return;
+  }
+
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch {
+    printTestError(asJson, "invalid_config", "Could not read agent test suite file.");
+    process.exitCode = 2;
+    return;
+  }
+
+  let suite;
+  try {
+    suite = parseAgentTestSuite(raw);
+  } catch (error) {
+    const message = error instanceof SyntaxError
+      ? "Agent test suite file is not valid JSON."
+      : error instanceof Error ? error.message : "Agent test suite file is invalid.";
+    printTestError(asJson, "invalid_config", message);
+    process.exitCode = 2;
+    return;
+  }
+
+  const filter = valueFor(args, "--filter");
+  if (hasFlag(args, "--dry-run")) {
+    const plan = {
+      suite: suite.name,
+      tests: suite.tests
+        .filter((test) => !filter || test.id === filter)
+        .map((test) => ({ id: test.id, action: test.action.kind })),
+    };
+    console.log(asJson ? JSON.stringify(plan, null, 2) : formatTestPlan(plan));
+    return;
+  }
+
+  const result = await runAgentTestSuite(suite, omitUndefined({
+    filter,
+    bail: hasFlag(args, "--bail") || undefined,
+  }));
+  console.log(asJson ? JSON.stringify(result, null, 2) : formatAgentTestSuiteResult(result));
+  if (result.verdict !== "passed") {
+    process.exitCode = 1;
+  }
+}
+
+function formatTestPlan(plan: { suite: string; tests: { id: string; action: string }[] }): string {
+  const lines = [`Suite: ${plan.suite}`, `Planned tests: ${plan.tests.length}`];
+  for (const test of plan.tests) {
+    lines.push(`  - ${test.id} (${test.action})`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function printTestError(asJson: boolean, code: string, message: string): void {
+  if (asJson) {
+    console.log(JSON.stringify({ verdict: "error", tests: [], error: { code, message } }, null, 2));
+    return;
+  }
+  console.error(`${code}: ${message}`);
+}
+
 async function currentCatalogSnapshot(args: string[], client: PremanClient) {
   const mcpId = valueFor(args, "--mcp-id");
   if (mcpId) {
@@ -879,6 +958,8 @@ Usage:
   npx preman-sdk snapshot --mcp-id mcp_123 --out preman-catalog.snapshot.json
   npx preman-sdk diff --approved preman-catalog.snapshot.json --mcp-id mcp_123
   npx preman-sdk assert --file preman.assert.json
+  npx preman-sdk test --suite preman.agent-tests.json
+  npx preman-sdk test --suite preman.agent-tests.json --json --bail
   npx preman-sdk typegen --file endpoints.json --out preman-endpoints.ts
   npx preman-sdk typegen --mcp-id mcp_123 --client --out preman-tools.ts
   npx preman-sdk install-snippet --target cursor --server-name auth-mcp --url https://api.preman.live/h/.../mcp --token-env PREMAN_CONSUMER_TOKEN --write
@@ -933,6 +1014,10 @@ Options:
   --allow-schema-broadening Do not fail diff on broader input schemas
   --allow-new-write-tools   Do not fail diff on new POST/PUT/PATCH/DELETE tools
   --file                    JSON input for register/deploy/import/apply/assert/typegen
+  --suite                   Agent action test suite file for test
+  --filter                  Run a single test id from the suite
+  --bail                    Stop the suite at the first non-passing test
+  --dry-run                 Parse and list the suite without running it
   --client                  For typegen --mcp-id, emit a thin callTool wrapper
   --consumer-label          Initial consumer token label (default: default-consumer)
   --idempotency-key         Idempotency key for write operations
