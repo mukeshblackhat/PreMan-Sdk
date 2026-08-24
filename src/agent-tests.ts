@@ -430,15 +430,19 @@ async function runHttpAction(
       signal: controller.signal,
       ...(action.body === undefined ? {} : { body: JSON.stringify(action.body) }),
     });
-    const durationMs = Math.max(0, Date.now() - started);
-
     if (response.status >= 300 && response.status < 400) {
-      return actionError(base, durationMs, "action_redirect_rejected", "Action request was redirected.", response.status);
+      return actionError(
+        base,
+        Math.max(0, Date.now() - started),
+        "action_redirect_rejected",
+        "Action request was redirected.",
+        response.status,
+      );
     }
     if (!response.ok) {
       return actionError(
         base,
-        durationMs,
+        Math.max(0, Date.now() - started),
         "action_http_error",
         `Action request returned status ${response.status}.`,
         response.status,
@@ -446,6 +450,7 @@ async function runHttpAction(
     }
 
     const body = await readActionBody(response, method, controller.signal);
+    const durationMs = Math.max(0, Date.now() - started);
     if (body.error) {
       return actionError(base, durationMs, body.error.code, body.error.message, response.status);
     }
@@ -492,11 +497,21 @@ async function readActionBody(
   }
 
   if (isJsonContentType(contentType)) {
+    let value: unknown;
     try {
-      return { value: JSON.parse(text) as JsonValue };
+      value = JSON.parse(text) as unknown;
     } catch {
       return { error: { code: "action_invalid_json", message: "Action response returned malformed JSON." } };
     }
+    if (!isJsonValue(value)) {
+      return {
+        error: {
+          code: "action_invalid_json",
+          message: "Action response JSON body is not a serializable JSON value.",
+        },
+      };
+    }
+    return { value };
   }
 
   if (contentType.startsWith("text/")) {
@@ -603,6 +618,17 @@ function aggregateVerdict(verdicts: (AssertionVerdict | undefined)[]): Assertion
   if (verdicts.includes("error")) return "error";
   if (verdicts.includes("failed")) return "failed";
   return "passed";
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  const record = asRecord(value);
+  if (record) {
+    return Object.values(record).every(isJsonValue);
+  }
+  return false;
 }
 
 function isJsonContentType(contentType: string): boolean {

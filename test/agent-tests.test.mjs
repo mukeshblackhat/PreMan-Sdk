@@ -456,6 +456,51 @@ test("rejects action responses that are neither JSON nor text", async () => {
   assert.equal(result.tests[0].action.error.code, "action_unsupported_content_type");
 });
 
+test("action latency covers body download, not just time to headers", async () => {
+  const parsed = parseAgentTestSuite(suite([{
+    id: "slow-body-latency",
+    action: httpAction,
+    expect: [{ op: "latency_threshold", maxMs: 50 }],
+  }]));
+
+  const result = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response(
+      new ReadableStream({
+        start(controller) {
+          setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode('{"ok":true}'));
+            controller.close();
+          }, 120);
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+  });
+
+  assert.equal(result.verdict, "failed");
+  assert.equal(result.tests[0].action.durationMs >= 100, true);
+});
+
+test("rejects a JSON body that is not a serializable JSON value", async () => {
+  const parsed = parseAgentTestSuite(suite([{
+    id: "non-finite",
+    action: httpAction,
+    expect: [{ op: "exists" }],
+  }]));
+
+  const result = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response('{"amount":1e999}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  });
+
+  assert.equal(result.verdict, "error");
+  assert.equal(result.tests[0].action.error.code, "action_invalid_json");
+});
+
 test("main package re-exports agent test helpers", () => {
   assert.equal(typeof main.parseAgentTestSuite, "function");
   assert.equal(typeof main.runAgentTestSuite, "function");
