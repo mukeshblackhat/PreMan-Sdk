@@ -203,7 +203,9 @@ export async function runAgentTestCase(
 
   return omitUndefined({
     ...base,
-    verdict: aggregateVerdict([expect?.verdict, verify?.verdict]),
+    verdict: aggregateVerdict(
+      [expect?.verdict, verify?.verdict].filter((verdict): verdict is AssertionVerdict => Boolean(verdict)),
+    ),
     durationMs: Math.max(0, Date.now() - started),
     expect,
     verify,
@@ -614,7 +616,7 @@ function verdictSigil(verdict: AssertionVerdict): string {
   return "!";
 }
 
-function aggregateVerdict(verdicts: (AssertionVerdict | undefined)[]): AssertionVerdict {
+function aggregateVerdict(verdicts: AssertionVerdict[]): AssertionVerdict {
   if (verdicts.includes("error")) return "error";
   if (verdicts.includes("failed")) return "failed";
   return "passed";
@@ -632,8 +634,7 @@ function isJsonValue(value: unknown): value is JsonValue {
 }
 
 function isJsonContentType(contentType: string): boolean {
-  const value = contentType.toLowerCase();
-  return value.includes("application/json") || value.includes("+json");
+  return /\bapplication\/json\b/i.test(contentType) || /\+json\b/i.test(contentType);
 }
 
 function abortError(): Error {
@@ -643,7 +644,7 @@ function abortError(): Error {
 }
 
 function isAbortError(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && (error as { name?: string }).name === "AbortError");
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function sanitizeEndpoint(rawUrl: string): string {
@@ -655,7 +656,7 @@ function sanitizeEndpoint(rawUrl: string): string {
     url.username = "";
     url.password = "";
     url.hash = "";
-    for (const key of [...url.searchParams.keys()]) {
+    for (const key of Array.from(url.searchParams.keys())) {
       url.searchParams.set(key, "REDACTED");
     }
     return url.toString();

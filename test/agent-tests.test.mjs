@@ -501,6 +501,29 @@ test("rejects a JSON body that is not a serializable JSON value", async () => {
   assert.equal(result.tests[0].action.error.code, "action_invalid_json");
 });
 
+test("json content-type detection matches probe word-boundary rules", async () => {
+  const parsed = parseAgentTestSuite(suite([{ id: "a", action: httpAction, expect: [{ op: "exists" }] }]));
+
+  const jsonp = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response('{"a":1}', {
+      status: 200,
+      headers: { "content-type": "application/jsonp" },
+    }),
+  });
+  assert.equal(jsonp.tests[0].action.error.code, "action_unsupported_content_type");
+
+  const vendorJson = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response('{"a":1}', {
+      status: 200,
+      headers: { "content-type": "application/vnd.api+json; charset=utf-8" },
+    }),
+  });
+  assert.equal(vendorJson.verdict, "passed");
+  assert.deepEqual(vendorJson.tests[0].action.output, { a: 1 });
+});
+
 test("main package re-exports agent test helpers", () => {
   assert.equal(typeof main.parseAgentTestSuite, "function");
   assert.equal(typeof main.runAgentTestSuite, "function");
