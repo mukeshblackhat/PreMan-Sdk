@@ -411,10 +411,11 @@ verifies without driving an action first. `method` defaults to `POST` and
 `timeoutMs` defaults to 5000.
 
 As with probes, literal `headers` are rejected in a suite file so credentials
-stay out of version control - use `headersFromEnv`. Action URLs are redacted in
-output, and a non-2xx action response is reported as an errored test rather than
-a failed assertion, so an action that could not run is distinguishable from one
-whose result was wrong.
+stay out of version control - use `headersFromEnv`. Action URLs may not embed
+username or password credentials, and are redacted in output. A non-2xx action
+response is reported as an errored test rather than a failed assertion, so an
+action that could not run is distinguishable from one whose result was wrong.
+Action responses must be JSON, text, empty, or a HEAD response.
 
 Exit codes: `0` when every test passed, `1` when any test failed or errored, and
 `2` when the suite file could not be read or parsed. See

@@ -542,21 +542,33 @@ async function handleTestCommand(args: string[]): Promise<void> {
   }
 
   const filter = valueFor(args, "--filter");
+  const selected = suite.tests.filter((test) => !filter || test.id === filter);
+  if (filter && selected.length === 0) {
+    printTestError(asJson, "invalid_config", `No test in suite "${suite.name}" matches filter "${filter}".`);
+    process.exitCode = 2;
+    return;
+  }
+
   if (hasFlag(args, "--dry-run")) {
     const plan = {
       suite: suite.name,
-      tests: suite.tests
-        .filter((test) => !filter || test.id === filter)
-        .map((test) => ({ id: test.id, action: test.action.kind })),
+      tests: selected.map((test) => ({ id: test.id, action: test.action.kind })),
     };
     console.log(asJson ? JSON.stringify(plan, null, 2) : formatTestPlan(plan));
     return;
   }
 
-  const result = await runAgentTestSuite(suite, omitUndefined({
-    filter,
-    bail: hasFlag(args, "--bail") || undefined,
-  }));
+  let result;
+  try {
+    result = await runAgentTestSuite(suite, omitUndefined({
+      filter,
+      bail: hasFlag(args, "--bail") || undefined,
+    }));
+  } catch (error) {
+    printTestError(asJson, "invalid_config", error instanceof Error ? error.message : "Agent test suite could not be run.");
+    process.exitCode = 2;
+    return;
+  }
   console.log(asJson ? JSON.stringify(result, null, 2) : formatAgentTestSuiteResult(result));
   if (result.verdict !== "passed") {
     process.exitCode = 1;

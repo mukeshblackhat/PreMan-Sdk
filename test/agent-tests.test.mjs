@@ -374,6 +374,88 @@ test("formats a suite result as plain text", async () => {
   assert.match(failingText, /Suite verdict: failed\./);
 });
 
+test("rejects an empty expect array", () => {
+  assert.throws(
+    () => parseAgentTestSuite(suite([{ id: "a", action: httpAction, expect: [] }])),
+    /expect must be a non-empty array/,
+  );
+});
+
+test("rejects action urls that embed credentials", () => {
+  assert.throws(
+    () => parseAgentTestSuite(suite([{
+      id: "a",
+      action: { ...httpAction, url: "https://user:pass@staging.example.com/agent/refund" },
+      expect: [{ op: "exists" }],
+    }])),
+    /username or password/,
+  );
+});
+
+test("throws when a filter matches no test id", async () => {
+  const parsed = parseAgentTestSuite(suite([{ id: "real", action: httpAction, expect: [{ op: "exists" }] }]));
+  await assert.rejects(
+    () => runAgentTestSuite(parsed, { env: {}, filter: "typo", fetchImpl: async () => jsonResponse({}) }),
+    /matches filter "typo"/,
+  );
+});
+
+test("treats a completed action with no body as found, like a probe", async () => {
+  const parsed = parseAgentTestSuite(suite([{
+    id: "no-content",
+    action: httpAction,
+    expect: [{ op: "exists" }],
+  }]));
+
+  const result = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response(null, { status: 204 }),
+  });
+
+  assert.equal(result.verdict, "passed");
+  assert.equal(result.tests[0].action.status, 204);
+  assert.equal(result.tests[0].action.output, null);
+});
+
+test("reports a timeout during body download as a timeout", async () => {
+  const parsed = parseAgentTestSuite(suite([{
+    id: "slow-body",
+    action: { ...httpAction, timeoutMs: 40 },
+    expect: [{ op: "exists" }],
+  }]));
+
+  const result = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"partial":'));
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ),
+  });
+
+  assert.equal(result.verdict, "error");
+  assert.equal(result.tests[0].action.error.code, "action_timeout");
+});
+
+test("rejects action responses that are neither JSON nor text", async () => {
+  const parsed = parseAgentTestSuite(suite([{
+    id: "binary",
+    action: httpAction,
+    expect: [{ op: "exists" }],
+  }]));
+
+  const result = await runAgentTestSuite(parsed, {
+    env: {},
+    fetchImpl: async () => new Response("binary", { status: 200, headers: { "content-type": "image/png" } }),
+  });
+
+  assert.equal(result.verdict, "error");
+  assert.equal(result.tests[0].action.error.code, "action_unsupported_content_type");
+});
+
 test("main package re-exports agent test helpers", () => {
   assert.equal(typeof main.parseAgentTestSuite, "function");
   assert.equal(typeof main.runAgentTestSuite, "function");
@@ -431,6 +513,10 @@ test("preman test CLI runs a suite without PREMAN_API_KEY and exits by verdict",
   const literalHeader = runCli(["--suite", literalHeaderFile, "--json"]);
   assert.equal(literalHeader.status, 2);
   assert.equal(`${literalHeader.stdout}${literalHeader.stderr}`.includes("super-secret-value"), false);
+
+  const badFilter = runCli(["--suite", suiteFile, "--filter", "not-a-test-id", "--json"]);
+  assert.equal(badFilter.status, 2);
+  assert.equal(JSON.parse(badFilter.stdout).error.code, "invalid_config");
 
   const unreachable = runCli(["--suite", unreachableFile, "--json"]);
   assert.equal(unreachable.status, 1);

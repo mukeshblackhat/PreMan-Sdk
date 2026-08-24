@@ -137,6 +137,9 @@ export async function runAgentTestSuite(
   const selected = options.filter
     ? suite.tests.filter((test) => test.id === options.filter)
     : suite.tests;
+  if (options.filter && selected.length === 0) {
+    throw new PremanConfigError(`No test in suite "${suite.name}" matches filter "${options.filter}".`);
+  }
 
   const tests: AgentTestResult[] = [];
   for (const testCase of selected) {
@@ -183,8 +186,8 @@ export async function runAgentTestCase(
     ? await runStateAssertionConfig({
       id: `${testCase.id}:expect`,
       observation: {
-        found: action.output !== undefined,
-        value: action.output,
+        found: true,
+        value: action.output ?? null,
         latencyMs: action.durationMs,
       },
       assertions: testCase.expect,
@@ -251,8 +254,8 @@ function parseAgentTestCase(value: unknown, index: number): AgentTestCase {
 
 function parseExpect(value: unknown, testId: string): StateAssertion[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value)) {
-    throw new PremanConfigError(`Test "${testId}" expect must be an array of assertions.`);
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new PremanConfigError(`Test "${testId}" expect must be a non-empty array of assertions.`);
   }
   return value as StateAssertion[];
 }
@@ -336,6 +339,11 @@ function parseActionUrl(value: unknown, testId: string): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new PremanConfigError(`Test "${testId}" http action url must use http or https.`);
+  }
+  if (url.username || url.password) {
+    throw new PremanConfigError(
+      `Test "${testId}" http action url must not include username or password credentials.`,
+    );
   }
   return url.toString();
 }
@@ -437,7 +445,7 @@ async function runHttpAction(
       );
     }
 
-    const body = await readActionBody(response, method);
+    const body = await readActionBody(response, method, controller.signal);
     if (body.error) {
       return actionError(base, durationMs, body.error.code, body.error.message, response.status);
     }
@@ -471,28 +479,62 @@ function actionError(
 async function readActionBody(
   response: Response,
   method: HttpActionMethod,
-): Promise<{ value?: JsonValue; error?: undefined } | { error: ActionError }> {
-  if (method === "HEAD" || response.status === 204) {
-    return {};
+  signal: AbortSignal,
+): Promise<{ value: JsonValue; error?: undefined } | { error: ActionError }> {
+  if (method === "HEAD" || response.status === 204 || response.status === 205) {
+    return { value: null };
   }
+
   const contentType = response.headers.get("content-type") ?? "";
-  let text: string;
-  try {
-    text = await response.text();
-  } catch {
-    return { error: { code: "action_body_unreadable", message: "Action response body could not be read." } };
-  }
+  const text = await readResponseText(response, signal);
   if (!text) {
-    return {};
+    return { value: null };
   }
-  if (!isJsonContentType(contentType)) {
+
+  if (isJsonContentType(contentType)) {
+    try {
+      return { value: JSON.parse(text) as JsonValue };
+    } catch {
+      return { error: { code: "action_invalid_json", message: "Action response returned malformed JSON." } };
+    }
+  }
+
+  if (contentType.startsWith("text/")) {
     return { value: text };
   }
-  try {
-    return { value: JSON.parse(text) as JsonValue };
-  } catch {
-    return { error: { code: "action_invalid_json", message: "Action response was not valid JSON." } };
+
+  return {
+    error: {
+      code: "action_unsupported_content_type",
+      message: "Action response must be JSON, text, empty, or a HEAD response.",
+    },
+  };
+}
+
+function readResponseText(response: Response, signal: AbortSignal): Promise<string> {
+  if (signal.aborted) {
+    return Promise.reject(abortError());
   }
+
+  let removeAbortListener: (() => void) | undefined;
+  const body = response.text();
+  body.catch(() => undefined);
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => {
+      try {
+        response.body?.cancel().catch(() => undefined);
+      } catch {
+        // Response.text() may already own the stream lock in some runtimes.
+      }
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+
+  return Promise.race([body, aborted]).finally(() => {
+    removeAbortListener?.();
+  });
 }
 
 function resolveActionHeaders(
@@ -566,6 +608,12 @@ function aggregateVerdict(verdicts: (AssertionVerdict | undefined)[]): Assertion
 function isJsonContentType(contentType: string): boolean {
   const value = contentType.toLowerCase();
   return value.includes("application/json") || value.includes("+json");
+}
+
+function abortError(): Error {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
 }
 
 function isAbortError(error: unknown): boolean {
