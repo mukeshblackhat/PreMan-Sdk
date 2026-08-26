@@ -17,6 +17,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./agent-tests": {
+      "types": "./dist/agent-tests.d.ts",
+      "import": "./dist/agent-tests.js"
+    },
     "./importers": {
       "types": "./dist/importers.d.ts",
       "import": "./dist/importers.js"
