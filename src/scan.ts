@@ -5,17 +5,18 @@ import { expressAdapter } from "./scan-express.js";
 import { fastapiAdapter } from "./scan-fastapi.js";
 import { fromOpenApi } from "./importers.js";
 import { PremanConfigError } from "./errors.js";
-import type { EndpointDefinition, HttpMethod } from "./types.js";
+import type { EndpointDefinition, HttpMethod, JsonSchema } from "./types.js";
 
 /**
  * One route found in a checkout. Field names are the shape
  * `register_discovered_endpoints` accepts, so scan output feeds the hosted API
  * with no translation.
  *
- * Deliberately no body or query schema. A scan auto-discovers every `openapi*.json`
- * under the scanned directory, so anything copied out of a spec is printed by
- * `scan --json` — into CI logs — without the user ever naming that file. Schema
- * extraction is `preman import openapi --file X`, where the user picks the file.
+ * Schemas from a committed spec are carried through verbatim, matching what
+ * `preman import openapi --file X` already emits for the same document — neither
+ * path redacts, so a scan and an import of one spec agree field for field. The
+ * `specs` list names every file that was read, so a spec discovered under `--dir`
+ * is never used without being reported.
  */
 export type DiscoveredEndpoint = {
   method: HttpMethod;
@@ -23,6 +24,8 @@ export type DiscoveredEndpoint = {
   source_location: string;
   confidence: number;
   tags?: string[];
+  request_body_schema?: JsonSchema;
+  query_schema?: JsonSchema;
 };
 
 /** A source file handed to an adapter. Adapters never touch the filesystem themselves. */
@@ -350,6 +353,8 @@ function endpointsFromSpec(spec: SourceFile): SpecParse {
         source_location: spec.path,
         confidence: SPEC_CONFIDENCE,
         tags: endpoint.tags,
+        request_body_schema: endpoint.request_body_schema ?? endpoint.requestBodySchema,
+        query_schema: endpoint.query_schema ?? endpoint.querySchema,
       })];
     }),
   };
@@ -401,6 +406,8 @@ function mergeEndpointPair(left: DiscoveredEndpoint, right: DiscoveredEndpoint):
     source_location: sourceLocationFor(stronger, weaker),
     confidence: stronger.confidence,
     tags: stronger.tags ?? weaker.tags,
+    request_body_schema: stronger.request_body_schema ?? weaker.request_body_schema,
+    query_schema: stronger.query_schema ?? weaker.query_schema,
   });
 }
 

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { normalizePathTemplate, scanDirectory, sortEndpoints } from "../dist/scan.js";
+import { fromOpenApi } from "../dist/importers.js";
 import { PremanConfigError } from "../dist/errors.js";
 import * as main from "../dist/index.js";
 
@@ -30,6 +31,7 @@ const SCANNABLE_FIXTURES = [
   "fastapi-decoys",
   "fastapi-methods",
   "spec-secrets",
+  "scan-cap",
 ];
 
 /** Every endpoint `fastapi-app/` must produce, in `sortEndpoints()` order. */
@@ -55,6 +57,13 @@ const FASTAPI_ENDPOINTS = [
     source_location: "main.py:23",
     confidence: 1,
     tags: ["users"],
+    // `openapi.json` states a requestBody for this operation, so the merged endpoint
+    // carries it verbatim — the same schema `preman import openapi --file` emits.
+    request_body_schema: {
+      type: "object",
+      properties: { email: { type: "string" }, name: { type: "string" } },
+      required: ["email"],
+    },
   },
   {
     method: "GET",
@@ -81,12 +90,23 @@ const EXPRESS_ENDPOINTS = [
   { method: "PATCH", path_template: "/users/{id}", source_location: "routes/users.js:10", confidence: 0.9 },
 ];
 
-/** The fake bait planted in `spec-secrets/openapi.json`, none of which may reach the output. */
-const PLANTED_SECRETS = [
+/**
+ * The values planted in `spec-secrets/openapi.json`'s request body schema. A spec's
+ * schema is emitted verbatim, exactly as `preman import openapi --file` emits it, so
+ * every one of these reaches the output unredacted.
+ */
+const SPEC_BODY_VALUES = [
   "pm_live_FAKEinDescription",
   "pm_live_FAKEinExample",
   "pm_live_FAKEinDefault",
   "pm_live_FAKEinEnum",
+];
+
+/**
+ * The values planted on that spec's query parameter. `fromOpenApi` emits no query
+ * schema, so scan has none to carry and these never appear.
+ */
+const SPEC_QUERY_VALUES = [
   "pm_test_FAKEinQueryExample",
   "pm_test_FAKEinQueryDefault",
 ];
@@ -97,6 +117,19 @@ function endpointFor(result, method, pathTemplate) {
   );
   assert.equal(found.length, 1, `expected exactly one ${method} ${pathTemplate}`);
   return found[0];
+}
+
+/**
+ * The `requestBodySchema` `preman import openapi --file` emits for one operation of a
+ * fixture spec. Scan must produce exactly this, so the two commands agree on one input.
+ */
+function importedBodySchema(fixtureName, method, pathTemplate) {
+  const specText = readFileSync(join(fixture(fixtureName), "openapi.json"), "utf8");
+  const found = fromOpenApi(specText).filter(
+    (endpoint) => endpoint.method === method && normalizePathTemplate(endpoint.path) === pathTemplate,
+  );
+  assert.equal(found.length, 1, `expected exactly one ${method} ${pathTemplate} in ${fixtureName}/openapi.json`);
+  return found[0].requestBodySchema;
 }
 
 /** Asserts the scan fails loudly and hands the message back for content assertions. */
@@ -306,8 +339,14 @@ test("spec and source merge field-wise without either side discarding the other"
   assert.equal(postUsers.source_location, "main.py:23");
   assert.equal(postUsers.confidence, 1);
   assert.deepEqual(postUsers.tags, ["users"]);
-  // The spec states a requestBody for this operation; the scan must not carry it.
-  assert.equal("request_body_schema" in postUsers, false);
+  // The spec states a requestBody for this operation, so the merge carries it onto the
+  // source-derived route: the source keeps its location, the spec adds its schema.
+  assert.deepEqual(postUsers.request_body_schema, importedBodySchema("fastapi-app", "POST", "/users"));
+  assert.deepEqual(
+    Object.keys(postUsers).sort(),
+    ["confidence", "method", "path_template", "request_body_schema", "source_location", "tags"],
+  );
+  // The spec states no query parameter schema, and `fromOpenApi` emits none regardless.
   assert.equal("query_schema" in postUsers, false);
 
   const specOnly = endpointFor(result, "GET", "/reports/summary");
@@ -362,6 +401,26 @@ test("a YAML spec is reported as unsupported rather than silently used", () => {
 });
 
 test("a scan cap sets truncated and stops the whole walk, not just one directory", () => {
+  // `scan-cap/` is built to tell the two walks apart. Entries are visited in name
+  // order: `app.js` (195 bytes) is admitted, `asub/` is queued, then `big.js`
+  // (1881 bytes) blows the budget. Ending the whole walk leaves `asub/` unvisited;
+  // breaking only the inner loop still shifts `asub/` off the queue and reads
+  // `asub/small.js` (124 bytes), which fits in what is left of the budget.
+  const wholeWalk = scanDirectory({ dir: fixture("scan-cap"), maxTotalBytes: 400 });
+  assert.equal(wholeWalk.truncated, true);
+  assert.equal(wholeWalk.fileCount, 1, "a queued directory must not be visited after the cap is hit");
+  assert.deepEqual(routes(wholeWalk), ["GET /first"]);
+  assert.equal(
+    wholeWalk.endpoints.some((endpoint) => endpoint.source_location.startsWith("asub/")),
+    false,
+    "asub/ was queued before the cap was hit, so only a whole-walk stop keeps it out",
+  );
+
+  const wholeWalkUncapped = scanDirectory({ dir: fixture("scan-cap") });
+  assert.equal(wholeWalkUncapped.truncated, false);
+  assert.equal(wholeWalkUncapped.fileCount, 3);
+  assert.deepEqual(routes(wholeWalkUncapped), ["GET /big", "GET /first", "GET /sub"]);
+
   const byFiles = scanDirectory({ dir: fixture("express-app"), maxFiles: 1 });
   assert.equal(byFiles.truncated, true);
   assert.equal(byFiles.fileCount, 1);
@@ -383,33 +442,40 @@ test("a scan cap sets truncated and stops the whole walk, not just one directory
   assert.equal(uncapped.fileCount, 4);
 });
 
-test("no endpoint carries a schema and a spec's planted secrets never reach the output", () => {
+test("a spec's request_body_schema is emitted verbatim and matches what `import openapi` produces", () => {
+  const secrets = scanDirectory({ dir: fixture("spec-secrets") });
+  assert.deepEqual(routes(secrets), ["POST /charges"]);
+  assert.deepEqual(secrets.specs, ["openapi.json"]);
+
+  const charge = endpointFor(secrets, "POST", "/charges");
+  const imported = importedBodySchema("spec-secrets", "POST", "/charges");
+  assert.notEqual(imported, undefined, "the fixture spec must state a requestBody for this test to mean anything");
+  assert.deepEqual(charge.request_body_schema, imported, "scan and `import openapi` must agree on one spec");
+
+  // Verbatim means verbatim: `example`, `default`, `enum` and `description` all survive,
+  // exactly as `preman import openapi --file` passes them through. A secret committed to
+  // a spec is already in the repo; neither command redacts one.
+  const json = JSON.stringify(secrets);
+  for (const value of SPEC_BODY_VALUES) {
+    assert.equal(json.includes(value), true, `scan dropped ${value} from the spec's body schema`);
+  }
+
+  // `fromOpenApi` emits no query schema, so scan has none to carry and never invents one.
+  assert.equal("query_schema" in charge, false);
+  for (const value of SPEC_QUERY_VALUES) {
+    assert.equal(json.includes(value), false, `scan invented a query schema carrying ${value}`);
+  }
+
   for (const name of SCANNABLE_FIXTURES) {
-    const result = scanDirectory({ dir: fixture(name) });
-    for (const endpoint of result.endpoints) {
-      assert.equal("request_body_schema" in endpoint, false, `${name} leaked request_body_schema`);
-      assert.equal("query_schema" in endpoint, false, `${name} leaked query_schema`);
+    for (const endpoint of scanDirectory({ dir: fixture(name) }).endpoints) {
       assert.deepEqual(
-        Object.keys(endpoint).filter((key) => key !== "tags").sort(),
+        Object.keys(endpoint).filter((key) => key !== "tags" && key !== "request_body_schema").sort(),
         ["confidence", "method", "path_template", "source_location"],
         `${name} endpoint carries an unexpected field`,
       );
+      assert.equal("query_schema" in endpoint, false, `${name} produced a query_schema, which fromOpenApi never emits`);
     }
   }
-
-  const secrets = scanDirectory({ dir: fixture("spec-secrets") });
-  assert.deepEqual(routes(secrets), ["POST /charges"], "the bait spec must still yield its route");
-  assert.deepEqual(secrets.specs, ["openapi.json"]);
-
-  const json = JSON.stringify(secrets);
-  for (const secret of PLANTED_SECRETS) {
-    assert.equal(json.includes(secret), false, `scan output leaked ${secret}`);
-  }
-  assert.equal(/pm_(live|test)_/.test(json), false);
-  assert.equal(json.includes("example"), false);
-  assert.equal(json.includes("default"), false);
-  assert.equal(json.includes("enum"), false);
-  assert.equal(json.includes("description"), false);
 });
 
 test("scanning the same tree twice produces deep-equal results", () => {
@@ -489,7 +555,8 @@ test("preman scan CLI reports endpoints without PREMAN_API_KEY and exits by outc
   assert.equal(parsed.fileCount, 7);
   assert.deepEqual(parsed.endpoints, FASTAPI_ENDPOINTS);
   assert.equal("error" in parsed, false);
-  assert.equal(json.stdout.includes("request_body_schema"), false);
+  // The spec states a requestBody for POST /users, so `scan --json` prints it.
+  assert.equal(json.stdout.includes("request_body_schema"), true);
   assert.equal(json.stdout.includes("query_schema"), false);
 
   const text = runCli(["--dir", "test/fixtures/express-app"]);
@@ -510,6 +577,11 @@ test("preman scan CLI reports endpoints without PREMAN_API_KEY and exits by outc
   assert.equal(bait.status, 0, bait.stderr);
   const parsedBait = JSON.parse(bait.stdout);
   assert.deepEqual(parsedBait.endpoints.map((endpoint) => endpoint.path_template), ["/charges"]);
+  assert.deepEqual(
+    parsedBait.endpoints[0].request_body_schema,
+    importedBodySchema("spec-secrets", "POST", "/charges"),
+    "the CLI prints the spec's schema exactly as `import openapi` emits it",
+  );
 
   const unsupported = runCli(["--dir", "test/fixtures/unknown-app", "--json"]);
   assert.equal(unsupported.status, 2);
@@ -544,10 +616,14 @@ test("preman scan CLI reports endpoints without PREMAN_API_KEY and exits by outc
   const allOutput = [
     json, text, yamlSpec, bait, unsupported, noEndpoints, belowFloor, metFloor, missingDir, emptyDir,
   ].map((run) => `${run.stdout}${run.stderr}`).join("");
-  for (const secret of PLANTED_SECRETS) {
-    assert.equal(allOutput.includes(secret), false, `CLI output leaked ${secret}`);
+  // `--json` prints the spec's body schema unchanged, and nothing from a query parameter.
+  for (const value of SPEC_BODY_VALUES) {
+    assert.equal(allOutput.includes(value), true, `CLI dropped ${value} from the spec's body schema`);
   }
-  assert.equal(/pm_(live|test)_/.test(allOutput), false);
+  for (const value of SPEC_QUERY_VALUES) {
+    assert.equal(allOutput.includes(value), false, `CLI printed ${value} from a query parameter`);
+  }
+  // The scan is offline, so no run may mention a key it never needed.
   assert.equal(allOutput.includes("PREMAN_API_KEY"), false);
   assert.equal(allOutput.includes("Missing API key"), false);
   assert.equal(allOutput.includes("Authorization"), false);
