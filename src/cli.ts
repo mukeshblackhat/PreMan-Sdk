@@ -636,6 +636,9 @@ function formatScanResult(result: ScanResult): string {
   for (const spec of result.unsupportedSpecs) {
     lines.push(`Spec not used: ${spec.path} — ${spec.reason}`);
   }
+  for (const mount of result.unresolvedMounts) {
+    lines.push(`Warning: ${mount.path} mounts ${mount.target} — ${mount.reason}`);
+  }
   for (const endpoint of result.endpoints) {
     lines.push(`  ${endpoint.method.padEnd(6)} ${endpoint.path_template}  (${endpoint.source_location})`);
   }
